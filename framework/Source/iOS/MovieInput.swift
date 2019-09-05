@@ -6,12 +6,13 @@ public class MovieInput: ImageSource {
     
     let yuvConversionShader:ShaderProgram
     let asset:AVAsset
-    let assetReader:AVAssetReader
+    var assetReader:AVAssetReader!
     let playAtActualSpeed:Bool
     let loop:Bool
     var videoEncodingIsFinished = false
-    var previousFrameTime = kCMTimeZero
+    var previousFrameTime = CMTime.zero
     var previousActualFrameTime = CFAbsoluteTimeGetCurrent()
+    var orientation = ImageOrientation.portrait
 
     var numberOfFramesCaptured = 0
     var totalFrameTimeDuringCapture:Double = 0.0
@@ -24,12 +25,7 @@ public class MovieInput: ImageSource {
         self.loop = loop
         self.yuvConversionShader = crashOnShaderCompileFailure("MovieInput"){try sharedImageProcessingContext.programForVertexShader(defaultVertexShaderForInputs(2), fragmentShader:YUVConversionFullRangeFragmentShader)}
         
-        assetReader = try AVAssetReader(asset:self.asset)
-        
-        let outputSettings:[String:AnyObject] = [(kCVPixelBufferPixelFormatTypeKey as String):NSNumber(value:Int32(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange))]
-        let readerVideoTrackOutput = AVAssetReaderTrackOutput(track:self.asset.tracks(withMediaType: AVMediaType.video)[0], outputSettings:outputSettings)
-        readerVideoTrackOutput.alwaysCopiesSampleData = false
-        assetReader.add(readerVideoTrackOutput)
+        self.assetReader = try createAssetReader()
         // TODO: Audio here
     }
 
@@ -42,7 +38,26 @@ public class MovieInput: ImageSource {
     // MARK: -
     // MARK: Playback control
 
+    private func createAssetReader() throws -> AVAssetReader {
+        let assetReader = try AVAssetReader(asset: self.asset)
+
+        let outputSettings:[String:AnyObject] = [(kCVPixelBufferPixelFormatTypeKey as String):NSNumber(value:Int32(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange))]
+        let readerVideoTrackOutput = AVAssetReaderTrackOutput(track:self.asset.tracks(withMediaType: AVMediaType.video)[0], outputSettings:outputSettings)
+        readerVideoTrackOutput.alwaysCopiesSampleData = false
+        assetReader.add(readerVideoTrackOutput)
+
+        return assetReader
+    }
+
     public func start() {
+
+        guard let assetReader = try? createAssetReader() else {
+            print("Couldn't create asset reader")
+            return
+        }
+
+        self.assetReader = assetReader
+
         asset.loadValuesAsynchronously(forKeys:["tracks"], completionHandler:{
             DispatchQueue.global().async(execute: {
                 guard (self.asset.statusOfValue(forKey: "tracks", error:nil) == .loaded) else { return }
@@ -51,24 +66,24 @@ public class MovieInput: ImageSource {
                     print("Couldn't start reading")
                     return
                 }
-                
+
                 var readerVideoTrackOutput:AVAssetReaderOutput? = nil;
-                
+		
                 for output in self.assetReader.outputs {
-                    if(output.mediaType == AVMediaType.video.rawValue) {
+                    if(output.mediaType.rawValue == AVMediaType.video.rawValue) {
                         readerVideoTrackOutput = output;
                     }
                 }
-                
+		
                 while (self.assetReader.status == .reading) {
                     self.readNextVideoFrame(from:readerVideoTrackOutput!)
                 }
-                
+		
                 if (self.assetReader.status == .completed) {
                     self.assetReader.cancelReading()
-                    
+
                     if (self.loop) {
-                        // TODO: Restart movie processing
+                        self.start()
                     } else {
                         self.endProcessing()
                     }
@@ -157,56 +172,19 @@ public class MovieInput: ImageSource {
         
         let startTime = CFAbsoluteTimeGetCurrent()
 
-        var luminanceGLTexture: CVOpenGLESTexture?
-        
-        glActiveTexture(GLenum(GL_TEXTURE0))
-        
-        let luminanceGLTextureResult = CVOpenGLESTextureCacheCreateTextureFromImage(kCFAllocatorDefault, sharedImageProcessingContext.coreVideoTextureCache, movieFrame, nil, GLenum(GL_TEXTURE_2D), GL_LUMINANCE, GLsizei(bufferWidth), GLsizei(bufferHeight), GLenum(GL_LUMINANCE), GLenum(GL_UNSIGNED_BYTE), 0, &luminanceGLTexture)
-        
-        assert(luminanceGLTextureResult == kCVReturnSuccess && luminanceGLTexture != nil)
-        
-        let luminanceTexture = CVOpenGLESTextureGetName(luminanceGLTexture!)
-        
-        glBindTexture(GLenum(GL_TEXTURE_2D), luminanceTexture)
-        glTexParameterf(GLenum(GL_TEXTURE_2D), GLenum(GL_TEXTURE_WRAP_S), GLfloat(GL_CLAMP_TO_EDGE));
-        glTexParameterf(GLenum(GL_TEXTURE_2D), GLenum(GL_TEXTURE_WRAP_T), GLfloat(GL_CLAMP_TO_EDGE));
-        
-        let luminanceFramebuffer: Framebuffer
-        do {
-            luminanceFramebuffer = try Framebuffer(context: sharedImageProcessingContext, orientation: .portrait, size: GLSize(width:GLint(bufferWidth), height:GLint(bufferHeight)), textureOnly: true, overriddenTexture: luminanceTexture)
-        } catch {
-            fatalError("Could not create a framebuffer of the size (\(bufferWidth), \(bufferHeight)), error: \(error)")
-        }
-        
-//         luminanceFramebuffer.cache = sharedImageProcessingContext.framebufferCache
+        let luminanceFramebuffer = sharedImageProcessingContext.framebufferCache.requestFramebufferWithProperties(orientation:orientation, size:GLSize(width:GLint(bufferWidth), height:GLint(bufferHeight)), textureOnly:true)
         luminanceFramebuffer.lock()
+        glActiveTexture(GLenum(GL_TEXTURE0))
+        glBindTexture(GLenum(GL_TEXTURE_2D), luminanceFramebuffer.texture)
+        glTexImage2D(GLenum(GL_TEXTURE_2D), 0, GL_LUMINANCE, GLsizei(bufferWidth), GLsizei(bufferHeight), 0, GLenum(GL_LUMINANCE), GLenum(GL_UNSIGNED_BYTE), CVPixelBufferGetBaseAddressOfPlane(movieFrame, 0))
         
-        
-        var chrominanceGLTexture: CVOpenGLESTexture?
-        
-        glActiveTexture(GLenum(GL_TEXTURE1))
-        
-        let chrominanceGLTextureResult = CVOpenGLESTextureCacheCreateTextureFromImage(kCFAllocatorDefault, sharedImageProcessingContext.coreVideoTextureCache, movieFrame, nil, GLenum(GL_TEXTURE_2D), GL_LUMINANCE_ALPHA, GLsizei(bufferWidth / 2), GLsizei(bufferHeight / 2), GLenum(GL_LUMINANCE_ALPHA), GLenum(GL_UNSIGNED_BYTE), 1, &chrominanceGLTexture)
-        
-        assert(chrominanceGLTextureResult == kCVReturnSuccess && chrominanceGLTexture != nil)
-        
-        let chrominanceTexture = CVOpenGLESTextureGetName(chrominanceGLTexture!)
-        
-        glBindTexture(GLenum(GL_TEXTURE_2D), chrominanceTexture)
-        glTexParameterf(GLenum(GL_TEXTURE_2D), GLenum(GL_TEXTURE_WRAP_S), GLfloat(GL_CLAMP_TO_EDGE));
-        glTexParameterf(GLenum(GL_TEXTURE_2D), GLenum(GL_TEXTURE_WRAP_T), GLfloat(GL_CLAMP_TO_EDGE));
-        
-        let chrominanceFramebuffer: Framebuffer
-        do {
-            chrominanceFramebuffer = try Framebuffer(context: sharedImageProcessingContext, orientation: .portrait, size: GLSize(width:GLint(bufferWidth), height:GLint(bufferHeight)), textureOnly: true, overriddenTexture: chrominanceTexture)
-        } catch {
-            fatalError("Could not create a framebuffer of the size (\(bufferWidth), \(bufferHeight)), error: \(error)")
-        }
-        
-//         chrominanceFramebuffer.cache = sharedImageProcessingContext.framebufferCache
+        let chrominanceFramebuffer = sharedImageProcessingContext.framebufferCache.requestFramebufferWithProperties(orientation:orientation, size:GLSize(width:GLint(bufferWidth), height:GLint(bufferHeight)), textureOnly:true)
         chrominanceFramebuffer.lock()
+        glActiveTexture(GLenum(GL_TEXTURE1))
+        glBindTexture(GLenum(GL_TEXTURE_2D), chrominanceFramebuffer.texture)
+        glTexImage2D(GLenum(GL_TEXTURE_2D), 0, GL_LUMINANCE_ALPHA, GLsizei(bufferWidth / 2), GLsizei(bufferHeight / 2), 0, GLenum(GL_LUMINANCE_ALPHA), GLenum(GL_UNSIGNED_BYTE), CVPixelBufferGetBaseAddressOfPlane(movieFrame, 1))
         
-        let movieFramebuffer = sharedImageProcessingContext.framebufferCache.requestFramebufferWithProperties(orientation:.portrait, size:GLSize(width:GLint(bufferWidth), height:GLint(bufferHeight)), textureOnly:false)
+        let movieFramebuffer = sharedImageProcessingContext.framebufferCache.requestFramebufferWithProperties(orientation:orientation, size:GLSize(width:GLint(bufferWidth), height:GLint(bufferHeight)), textureOnly:false)
         
         convertYUVToRGB(shader:self.yuvConversionShader, luminanceFramebuffer:luminanceFramebuffer, chrominanceFramebuffer:chrominanceFramebuffer, resultFramebuffer:movieFramebuffer, colorConversionMatrix:conversionMatrix)
         CVPixelBufferUnlockBaseAddress(movieFrame, CVPixelBufferLockFlags(rawValue:CVOptionFlags(0)))
