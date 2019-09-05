@@ -20,20 +20,11 @@ public class MovieOutput: ImageConsumer, AudioEncodingTarget {
     private var videoEncodingIsFinished = false
     private var audioEncodingIsFinished = false
     private var startTime:CMTime?
-    private var previousFrameTime = kCMTimeNegativeInfinity
-    private var previousAudioTime = kCMTimeNegativeInfinity
+    private var previousFrameTime = CMTime.negativeInfinity
+    private var previousAudioTime = CMTime.negativeInfinity
     private var encodingLiveVideo:Bool
     var pixelBuffer:CVPixelBuffer? = nil
     var renderFramebuffer:Framebuffer!
-    
-    var transform:CGAffineTransform {
-        get {
-            return assetWriterVideoInput.transform
-        }
-        set {
-            assetWriterVideoInput.transform = transform
-        }
-    }
     
     public init(URL:Foundation.URL, size:Size, fileType:AVFileType = AVFileType.mov, liveVideo:Bool = false, settings:[String:AnyObject]? = nil) throws {
         if sharedImageProcessingContext.supportsTextureCaches() {
@@ -45,7 +36,7 @@ public class MovieOutput: ImageConsumer, AudioEncodingTarget {
         self.size = size
         assetWriter = try AVAssetWriter(url:URL, fileType:fileType)
         // Set this to make sure that a functional movie is produced, even if the recording is cut off mid-stream. Only the last second should be lost in that case.
-        assetWriter.movieFragmentInterval = CMTimeMakeWithSeconds(1.0, 1000)
+        assetWriter.movieFragmentInterval = CMTimeMakeWithSeconds(1.0, preferredTimescale: 1000)
         
         var localSettings:[String:AnyObject]
         if let settings = settings {
@@ -71,10 +62,7 @@ public class MovieOutput: ImageConsumer, AudioEncodingTarget {
         assetWriter.add(assetWriterVideoInput)
     }
     
-    public func startRecording(transform:CGAffineTransform? = nil) {
-        if let transform = transform {
-            assetWriterVideoInput.transform = transform
-        }
+    public func startRecording() {
         startTime = nil
         sharedImageProcessingContext.runOperationSynchronously{
             self.isRecording = self.assetWriter.startWriting()
@@ -235,7 +223,7 @@ public extension Timestamp {
     
     public var asCMTime:CMTime {
         get {
-            return CMTimeMakeWithEpoch(value, timescale, epoch)
+            return CMTimeMakeWithEpoch(value: value, timescale: timescale, epoch: epoch)
         }
     }
 }
